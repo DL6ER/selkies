@@ -11,6 +11,7 @@ from aiohttp import web
 from typing import Dict, Optional, Tuple
 
 from settings import settings_webrtc as settings
+from . import audit
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -119,11 +120,36 @@ async def create_api_server(manager: StreamSupervisor, host: str, port: int):
 		await runner.cleanup()
 		logger.info("API server shut down successfully.")
 
+def _audit_timeout_seconds() -> float:
+    raw = getattr(settings, "audit_webhook_timeout", "2.0")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "audit_webhook_timeout=%r is not a valid float, defaulting to 2.0",
+            raw,
+        )
+        return 2.0
+
+
 async def run():
     mode = getattr(settings, "mode", None)
     if mode not in ["websockets", "webrtc"]:
         logger.error(f"Invalid mode '{mode}' specified in settings. Choose 'websockets' or 'webrtc'.")
         return
+
+    # Configure the audit emitter before any service starts so that the
+    # very first clipboard or file-transfer event can be recorded. If
+    # audit_webhook_url is empty, the module-level emit() collapses to
+    # a no-op and the rest of the code does not need feature flags.
+    audit_url = getattr(settings, "audit_webhook_url", "")
+    audit.configure(
+        url=audit_url,
+        token=getattr(settings, "audit_webhook_token", ""),
+        timeout_seconds=_audit_timeout_seconds(),
+    )
+    if audit_url:
+        logger.info("audit webhook enabled, target=%s", audit_url)
 
     managed_stream_modes = {
       "websockets": start_websockets_mode,
@@ -146,6 +172,10 @@ async def run():
         logger.error("run interrupted, exiting the process")
     except Exception as e:
         logger.error(f"Unexpected error in run: {e}", exc_info=True)
+    finally:
+        # Best-effort cleanup of the audit HTTP session so its background
+        # task does not leak past server shutdown.
+        await audit.close()
 
 def main():
 	try:

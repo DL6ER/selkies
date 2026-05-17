@@ -44,11 +44,15 @@ COMMON_SETTING_DEFINITIONS = [
     {'name': 'clipboard_out_enabled', 'type': 'bool', 'default': True, 'help': 'Enable server-to-client clipboard synchronization.'},
     {'name': 'command_enabled', 'type': 'bool', 'default': True, 'help': 'Enable parsing of command websocket messages.'},
     {'name': 'file_transfers', 'type': 'list', 'default': 'upload,download', 'meta': {'allowed': ['upload', 'download']}, 'help': 'Allowed file transfer directions (comma-separated: "upload,download"). Set to "" or "none" to disable.'},
+    {'name': 'audit_webhook_url', 'type': 'str', 'default': '', 'help': 'Optional HTTPS URL that receives best-effort JSON POSTs for clipboard and file-transfer events. Only metadata is sent (event type, byte size, mime type, timestamp); payload content is never logged. Empty disables the audit channel.'},
+    {'name': 'audit_webhook_token', 'type': 'str', 'default': '', 'help': 'Optional Bearer token sent as Authorization header on audit webhook POSTs. Use this to authenticate Selkies against the audit collector. Empty omits the Authorization header.'},
+    {'name': 'audit_webhook_timeout', 'type': 'str', 'default': '2.0', 'help': 'Per-request timeout in seconds (float) for audit webhook POSTs. Audit is fire-and-forget, on timeout the event is dropped with a warning log line. Default 2.0.'},
     {'name': 'framerate', 'type': 'range', 'default': '8-120', 'meta': {'default_value': 60}, 'help': 'Allowed framerate range (e.g., "8-165") or a fixed value (e.g., "60").'},
     {'name': 'h264_crf', 'type': 'range', 'default': '5-50', 'meta': {'default_value': 25}, 'help': 'Allowed H.264 CRF range (e.g., "5-50") or a fixed value.'},
     {'name': 'video_bitrate', 'type': 'range', 'default': '1-100', 'meta': {"default_value": 8}, 'help': 'Default video-bitrate aka CBR, in Megabits per second (Mbps), allowed range (e.g., "1-100") or a fixed value (e.g., "8" for 8 Mbps)'},
     {'name': 'rate_control_mode', 'type': 'enum', 'default': 'crf', 'meta': {'allowed': ['crf', 'cbr']}, 'help': 'Rate control mode for video encoding (cbr or crf). Only effective when enable_rate_control is true.'},
     {'name': 'enable_rate_control', 'type': 'bool', 'default': False, 'help': 'Enable rate control for video encoding. Used in association with rate_control_mode.'},
+
 
     # Audio Settings
     {'name': 'audio_bitrate', 'type': 'enum', 'default': '320000', 'meta': {'allowed': ['64000', '128000', '192000', '256000', '320000']}, 'help': 'The default audio bitrate.'},

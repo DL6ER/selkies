@@ -66,6 +66,7 @@ from datetime import datetime
 from shutil import which
 from signal import SIGINT, signal
 from .settings import settings_ws as settings, FINAL_SETTING_DEFINITIONS_WEBSOCKETS as SETTING_DEFINITIONS
+from . import audit as _audit
 
 try:
     from pcmflux import AudioCapture, AudioCaptureSettings, AudioChunkCallback
@@ -1980,6 +1981,15 @@ class DataStreamingServer:
                         try:
                             _, rel_path_from_client, size_str = message.split(":", 2)
                             file_size = int(size_str)
+                            # Audit-Hook: client announces an upload. Mirrors the
+                            # WebRTC-mode path in input_handler.py so the audit
+                            # collector sees the same event regardless of which
+                            # streaming mode the session uses.
+                            _audit.emit(
+                                "file.upload.start",
+                                filename=rel_path_from_client,
+                                announced_size_bytes=file_size,
+                            )
 
                             sane_rel_path = rel_path_from_client.strip('/\\')
                             sane_rel_path = os.path.normpath(sane_rel_path)
@@ -2045,39 +2055,44 @@ class DataStreamingServer:
                             )
 
                     elif message.startswith("FILE_UPLOAD_END:"):
+                        target_path = active_upload_target_path_conn
                         if (
-                            active_upload_target_path_conn
-                            and active_upload_target_path_conn
-                            in active_uploads_by_path_conn
+                            target_path
+                            and target_path in active_uploads_by_path_conn
                         ):
-                            active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ].close()
-                            data_logger.info(
-                                f"Upload finished: {active_upload_target_path_conn}"
+                            active_uploads_by_path_conn[target_path].close()
+                            data_logger.info(f"Upload finished: {target_path}")
+                            try:
+                                written_size = os.path.getsize(target_path)
+                            except OSError:
+                                written_size = -1
+                            _audit.emit(
+                                "file.upload.end",
+                                filename=os.path.basename(target_path),
+                                size_bytes=written_size,
                             )
-                            del active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ]
+                            del active_uploads_by_path_conn[target_path]
                         active_upload_target_path_conn = None
 
                     elif message.startswith("FILE_UPLOAD_ERROR:"):
                         data_logger.error(f"Client reported upload error: {message}")
+                        err_payload = message.split(":", 2)[1] if ":" in message else ""
+                        target_path = active_upload_target_path_conn
                         if (
-                            active_upload_target_path_conn
-                            and active_upload_target_path_conn
-                            in active_uploads_by_path_conn
+                            target_path
+                            and target_path in active_uploads_by_path_conn
                         ):
-                            active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ].close()
+                            active_uploads_by_path_conn[target_path].close()
                             try:
-                                os.remove(active_upload_target_path_conn)
+                                os.remove(target_path)
                             except OSError:
                                 pass
-                            del active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ]
+                            del active_uploads_by_path_conn[target_path]
+                        _audit.emit(
+                            "file.upload.error",
+                            filename=os.path.basename(target_path) if target_path else "",
+                            error=err_payload,
+                        )
                         active_upload_target_path_conn = None
 
                     elif message.startswith("SETTINGS,"):
@@ -2253,39 +2268,44 @@ class DataStreamingServer:
                             data_logger.warning(f"Malformed CLIENT_FRAME_ACK from {raddr}: {message}")
 
                     elif message.startswith("FILE_UPLOAD_END:"):
+                        target_path = active_upload_target_path_conn
                         if (
-                            active_upload_target_path_conn
-                            and active_upload_target_path_conn
-                            in active_uploads_by_path_conn
+                            target_path
+                            and target_path in active_uploads_by_path_conn
                         ):
-                            active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ].close()
-                            data_logger.info(
-                                f"Upload finished: {active_upload_target_path_conn}"
+                            active_uploads_by_path_conn[target_path].close()
+                            data_logger.info(f"Upload finished: {target_path}")
+                            try:
+                                written_size = os.path.getsize(target_path)
+                            except OSError:
+                                written_size = -1
+                            _audit.emit(
+                                "file.upload.end",
+                                filename=os.path.basename(target_path),
+                                size_bytes=written_size,
                             )
-                            del active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ]
+                            del active_uploads_by_path_conn[target_path]
                         active_upload_target_path_conn = None
 
                     elif message.startswith("FILE_UPLOAD_ERROR:"):
                         data_logger.error(f"Client reported upload error: {message}")
+                        err_payload = message.split(":", 2)[1] if ":" in message else ""
+                        target_path = active_upload_target_path_conn
                         if (
-                            active_upload_target_path_conn
-                            and active_upload_target_path_conn
-                            in active_uploads_by_path_conn
+                            target_path
+                            and target_path in active_uploads_by_path_conn
                         ):
-                            active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ].close()
+                            active_uploads_by_path_conn[target_path].close()
                             try:
-                                os.remove(active_upload_target_path_conn)
+                                os.remove(target_path)
                             except OSError:
                                 pass
-                            del active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ]
+                            del active_uploads_by_path_conn[target_path]
+                        _audit.emit(
+                            "file.upload.error",
+                            filename=os.path.basename(target_path) if target_path else "",
+                            error=err_payload,
+                        )
                         active_upload_target_path_conn = None
 
                     elif message == "START_VIDEO":

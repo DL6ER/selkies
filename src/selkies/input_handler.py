@@ -66,6 +66,8 @@ import msgpack
 import distro
 import aiofiles
 
+from . import audit as _audit
+
 logger_webrtc_input = logging.getLogger("webrtc_input")
 logger_selkies_gamepad = logging.getLogger("selkies_gamepad")
 
@@ -2253,6 +2255,15 @@ class WebRTCInput:
                     logger_webrtc_input.info(f"Finished multi-part clipboard receive. Total size: {received_size}")
                     data = self.multipart_clipboard_buffer.getvalue()
                     mime_type = self.multipart_clipboard_mime_type
+                    # Audit-Hook: client-to-server clipboard write. Only
+                    # metadata is recorded (size, mime); the payload itself
+                    # is not forwarded to the webhook.
+                    _audit.emit(
+                        "clipboard.receive",
+                        mime_type=mime_type,
+                        size_bytes=len(data),
+                        multipart=True,
+                    )
                     async def _write_multipart():
                         if mime_type == "text/plain":
                             text_data = data.decode("utf-8", "ignore")
@@ -2276,6 +2287,12 @@ class WebRTCInput:
                 try:
                     _, mime_type, b64_data = toks
                     data_bytes = base64.b64decode(b64_data)
+                    _audit.emit(
+                        "clipboard.receive",
+                        mime_type=mime_type,
+                        size_bytes=len(data_bytes),
+                        multipart=False,
+                    )
                     async def _write_cb():
                         if await self.write_clipboard(data_bytes, mime_type=mime_type):
                             logger_webrtc_input.info(f"Set binary clipboard content ({mime_type}), size: {len(data_bytes)} bytes")
@@ -2284,15 +2301,21 @@ class WebRTCInput:
                     logger_webrtc_input.error(f"Binary clipboard write error: {e}")
             else:
                 logger_webrtc_input.warning("Rejecting binary clipboard write: inbound binary clipboard disabled.")
-        elif msg_type == "cw": 
+        elif msg_type == "cw":
             if self.enable_clipboard in ["true", "in"]:
-                try: 
+                try:
                     data = base64.b64decode(toks[1]).decode("utf-8", 'ignore')
+                    _audit.emit(
+                        "clipboard.receive",
+                        mime_type="text/plain",
+                        size_bytes=len(data.encode("utf-8")),
+                        multipart=False,
+                    )
                     async def _write_cw():
                         if await self.write_clipboard(data):
                             logger_webrtc_input.info(f"Set clipboard content, length: {len(data)}")
                     asyncio.create_task(_write_cw())
-                except Exception as e: 
+                except Exception as e:
                     logger_webrtc_input.error(f"Clipboard decode error: {e}")
                     return
             else: 
@@ -2393,28 +2416,61 @@ class WebRTCInput:
                 logger_webrtc_input.warning("Upload directory doesn't exits, skipping the file upload")
                 return
             _, file, size = toks[0].split(":", 2)
+            # Audit-Hook: file upload started. Filename + announced size go
+            # into the event so the operator can correlate with FILE_UPLOAD_END
+            # (or _ERROR) below. Audit fires on intent; END/ERROR confirms
+            # the actual outcome.
+            try:
+                announced_size = int(size)
+            except (TypeError, ValueError):
+                announced_size = -1
+            _audit.emit(
+                "file.upload.start",
+                filename=file,
+                announced_size_bytes=announced_size,
+            )
             self.handle_upload_dir(file, size)
 
         elif toks[0].startswith("FILE_UPLOAD_END:"):
             toks = toks[0].split(":", 2)
             logger_webrtc_input.info("Received FILE UPLOAD END: " + " ".join(toks[1:]))
-            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
-                self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
-                logger_webrtc_input.info(f"Upload finished: {self.active_upload_target_path_conn}")
-                del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
+            target_path = self.active_upload_target_path_conn
+            if (target_path and target_path in self.active_uploads_by_path_conn):
+                self.active_uploads_by_path_conn[target_path].close()
+                logger_webrtc_input.info(f"Upload finished: {target_path}")
+                # Audit-Hook: file upload completed. We use os.path.getsize on
+                # the closed file so the event reflects what actually landed
+                # on disk, not just what the client announced at start.
+                try:
+                    written_size = os.path.getsize(target_path)
+                except OSError:
+                    written_size = -1
+                _audit.emit(
+                    "file.upload.end",
+                    filename=os.path.basename(target_path),
+                    size_bytes=written_size,
+                )
+                del self.active_uploads_by_path_conn[target_path]
                 self.active_upload_target_path_conn = None
 
         elif toks[0].startswith("FILE_UPLOAD_ERROR:"):
             logger_webrtc_input.error(f"Client reported upload error: {toks[0]}")
-            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
-                self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
+            err_payload = toks[0].split(":", 2)[1] if ":" in toks[0] else ""
+            target_path = self.active_upload_target_path_conn
+            if (target_path and target_path in self.active_uploads_by_path_conn):
+                self.active_uploads_by_path_conn[target_path].close()
                 try:
-                    os.remove(self.active_upload_target_path_conn)
+                    os.remove(target_path)
                 except OSError:
                     pass
-                del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
+                del self.active_uploads_by_path_conn[target_path]
+            _audit.emit(
+                "file.upload.error",
+                filename=os.path.basename(target_path) if target_path else "",
+                error=err_payload,
+            )
             self.active_upload_target_path_conn = None
-            logger_webrtc_input.info(f"Purged the file {toks[0].split(':', 2)[1]}")
+            logger_webrtc_input.info(f"Purged the file {err_payload}")
         elif toks[0].startswith("SETTINGS"):
             settings_data = ','.join(toks[1:]) if len(toks) > 1 else ""
             logger_webrtc_input.info(f"Received SETTINGS message: {settings_data}")

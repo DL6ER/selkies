@@ -239,6 +239,14 @@ class RTCApp:
 
         is_text = mime_type == "text/plain"
         data_bytes: bytes = data.encode() if is_text and isinstance(data, str) else data
+        # Emit audit event with metadata only. Contents are never logged.
+        # See selkies.audit for the fire-and-forget semantics.
+        from . import audit as _audit
+        _audit.emit(
+            "clipboard.send",
+            mime_type=mime_type,
+            size_bytes=len(data_bytes),
+        )
         clipboard_chunk_size = get_adjusted_chunk_size()
         if len(data_bytes) <= clipboard_chunk_size:
             b64data = base64.b64encode(data_bytes).decode('utf-8')
