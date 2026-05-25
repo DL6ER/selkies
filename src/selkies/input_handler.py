@@ -55,6 +55,8 @@ except ImportError:
     xtest = None
 import msgpack
 
+from . import audit as _audit
+
 logger_webrtc_input = logging.getLogger("webrtc_input")
 logger_selkies_gamepad = logging.getLogger("selkies_gamepad")
 
@@ -1863,6 +1865,12 @@ class WebRTCInput:
                 else:
                     logger_webrtc_input.info(f"Finished multi-part clipboard receive. Total size: {received_size}")
                     data = self.multipart_clipboard_buffer.getvalue()
+                    _audit.emit(
+                        "clipboard.receive",
+                        mime_type=self.multipart_clipboard_mime_type,
+                        size_bytes=len(data),
+                        multipart=True,
+                    )
                     if self.multipart_clipboard_mime_type == "text/plain":
                         text_data = data.decode("utf-8", "ignore")
                         if await self.write_clipboard(text_data):
@@ -1884,16 +1892,28 @@ class WebRTCInput:
                 try:
                     _, mime_type, b64_data = toks
                     data_bytes = base64.b64decode(b64_data)
+                    _audit.emit(
+                        "clipboard.receive",
+                        mime_type=mime_type,
+                        size_bytes=len(data_bytes),
+                        multipart=False,
+                    )
                     if await self.write_clipboard(data_bytes, mime_type=mime_type):
                         logger_webrtc_input.info(f"Set binary clipboard content ({mime_type}), size: {len(data_bytes)} bytes")
                 except Exception as e:
                     logger_webrtc_input.error(f"Binary clipboard write error: {e}")
             else:
                 logger_webrtc_input.warning("Rejecting binary clipboard write: inbound binary clipboard disabled.")
-        elif msg_type == "cw": 
+        elif msg_type == "cw":
             if self.enable_clipboard in ["true", "in"]:
                 try: data = base64.b64decode(toks[1]).decode("utf-8", 'ignore')
                 except Exception as e: logger_webrtc_input.error(f"Clipboard decode error: {e}"); return
+                _audit.emit(
+                    "clipboard.receive",
+                    mime_type="text/plain",
+                    size_bytes=len(data.encode("utf-8")),
+                    multipart=False,
+                )
                 if await self.write_clipboard(data):
                     logger_webrtc_input.info(f"Set clipboard content, length: {len(data)}")
             else: logger_webrtc_input.warning("Rejecting clipboard write: inbound clipboard disabled.")

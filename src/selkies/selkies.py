@@ -65,6 +65,7 @@ from datetime import datetime
 from shutil import which
 from signal import SIGINT, signal
 from .settings import settings, SETTING_DEFINITIONS
+from . import audit as _audit
 
 try:
     from pcmflux import AudioCapture, AudioCaptureSettings, AudioChunkCallback
@@ -2205,39 +2206,43 @@ class DataStreamingServer:
                             data_logger.warning(f"Malformed CLIENT_FRAME_ACK from {raddr}: {message}")
 
                     elif message.startswith("FILE_UPLOAD_END:"):
+                        _au_target = active_upload_target_path_conn
                         if (
-                            active_upload_target_path_conn
-                            and active_upload_target_path_conn
-                            in active_uploads_by_path_conn
+                            _au_target
+                            and _au_target in active_uploads_by_path_conn
                         ):
-                            active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ].close()
-                            data_logger.info(
-                                f"Upload finished: {active_upload_target_path_conn}"
+                            active_uploads_by_path_conn[_au_target].close()
+                            data_logger.info(f"Upload finished: {_au_target}")
+                            try:
+                                _au_size = os.path.getsize(_au_target)
+                            except OSError:
+                                _au_size = -1
+                            _audit.emit(
+                                "file.upload.end",
+                                filename=os.path.basename(_au_target),
+                                size_bytes=_au_size,
                             )
-                            del active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ]
+                            del active_uploads_by_path_conn[_au_target]
                         active_upload_target_path_conn = None
 
                     elif message.startswith("FILE_UPLOAD_ERROR:"):
                         data_logger.error(f"Client reported upload error: {message}")
+                        _au_target = active_upload_target_path_conn
                         if (
-                            active_upload_target_path_conn
-                            and active_upload_target_path_conn
-                            in active_uploads_by_path_conn
+                            _au_target
+                            and _au_target in active_uploads_by_path_conn
                         ):
-                            active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ].close()
+                            active_uploads_by_path_conn[_au_target].close()
                             try:
-                                os.remove(active_upload_target_path_conn)
+                                os.remove(_au_target)
                             except OSError:
                                 pass
-                            del active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ]
+                            del active_uploads_by_path_conn[_au_target]
+                        _audit.emit(
+                            "file.upload.error",
+                            filename=os.path.basename(_au_target) if _au_target else "",
+                            error=message.split(":", 2)[1] if ":" in message else "",
+                        )
                         active_upload_target_path_conn = None
 
                     elif message == "START_VIDEO":
@@ -3352,6 +3357,18 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
         logger_gst_app_resize.error(f"Error during resize handling for '{res_str}': {e}", exc_info=True)
 
 async def main():
+    try:
+        _audit_timeout = float(getattr(settings, "audit_webhook_timeout", "2.0") or "2.0")
+    except (TypeError, ValueError):
+        _audit_timeout = 2.0
+    _audit.configure(
+        url=getattr(settings, "audit_webhook_url", "") or "",
+        token=getattr(settings, "audit_webhook_token", "") or "",
+        timeout_seconds=_audit_timeout,
+    )
+    if getattr(settings, "audit_webhook_url", ""):
+        logger.info("audit webhook enabled, target=%s", settings.audit_webhook_url)
+
     is_secure_mode = bool(settings.master_token)
     if is_secure_mode:
         logger.info("Secure Mode ENABLED (SELKIES_MASTER_TOKEN is set).")
