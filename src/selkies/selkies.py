@@ -146,6 +146,15 @@ class SelkiesStreamingApp:
         """
         Asynchronously sends clipboard data to all clients, handling multipart for large data.
         """
+        try:
+            _audit_size = len(data.encode("utf-8")) if isinstance(data, str) else len(data)
+        except Exception:
+            _audit_size = -1
+        _audit.emit(
+            "clipboard.send",
+            mime_type=mime_type,
+            size_bytes=_audit_size,
+        )
         if not (self.data_streaming_server and self.data_streaming_server.clients):
             data_logger.warning("Cannot send clipboard: no clients or server not ready.")
             return
