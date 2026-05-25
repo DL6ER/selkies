@@ -986,6 +986,15 @@ class WebRTCInput:
                             self.wayland_shift_required_keys.add(sym)
 
     async def _on_clipboard_read(self, data, mime_type="text/plain"):
+        try:
+            _audit_size = len(data.encode("utf-8")) if isinstance(data, str) else len(data)
+        except Exception:
+            _audit_size = -1
+        _audit.emit(
+            "clipboard.send",
+            mime_type=mime_type,
+            size_bytes=_audit_size,
+        )
         await self.send_clipboard_data(data, mime_type)
     def _on_cursor_change(self, data): self.send_cursor_data(data)
     async def send_clipboard_data(self, data, mime_type="text/plain"):
