@@ -1598,6 +1598,18 @@ class DataStreamingServer:
             except Exception as e:
                 data_logger.warning(f"Failed to send initial cursor to new client {raddr}: {e}")
 
+        # Wie beim Cursor: ein frisch verbundener Client (typisch Re-Connect
+        # nach managedsave-restore eines geparkten Desk-VMs) muss auch den
+        # aktuellen Clipboard-Stand bekommen. Der Monitor-Loop sendet sonst nur
+        # bei Änderungen; gleicht der später kopierte Inhalt dem alten Stand,
+        # feuert nie ein "changed" und die Inner->Outer-Bridge erscheint tot.
+        # reset_clipboard_baseline() erzwingt einen Re-Push beim nächsten Tick.
+        if self.input_handler and hasattr(self.input_handler, "reset_clipboard_baseline"):
+            try:
+                self.input_handler.reset_clipboard_baseline()
+            except Exception as e:
+                data_logger.warning(f"Failed to reset clipboard baseline for new client {raddr}: {e}")
+
         server_settings_payload = {"type": "server_settings", "settings": {}}
         for setting_def in SETTING_DEFINITIONS:
             name = setting_def['name']
