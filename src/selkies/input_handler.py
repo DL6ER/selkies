@@ -864,6 +864,14 @@ class WebRTCInput:
         self.client_gamepad_associations = {} 
 
         self.clipboard_running = False
+        # Baseline des zuletzt an die Clients gesendeten Clipboard-Inhalts.
+        # Instanz-Attribut (frueher lokale Variable in start_clipboard), damit
+        # eine neue Client-Verbindung den Monitor zwingen kann, den aktuellen
+        # Clipboard-Stand erneut zu pushen (reset_clipboard_baseline). Sonst
+        # bekaeme ein nach managedsave-restore frisch verbundener Client nie
+        # den bestehenden Inhalt, nur kuenftige Aenderungen -> Inner->Outer-
+        # Bridge erscheint tot, wenn der kopierte Inhalt dem alten gleicht.
+        self.clipboard_last_data_bytes = b""
         self.uinput_mouse_socket_path = uinput_mouse_socket_path
         self.uinput_mouse_socket = None
         self.enable_clipboard = enable_clipboard
@@ -1885,7 +1893,7 @@ class WebRTCInput:
         
         logger_webrtc_input.info(f"Clipboard monitor running (binary mode: {self.enable_binary_clipboard in ['true', 'out']})")
         self.clipboard_running = True
-        last_data_bytes = b""
+        self.clipboard_last_data_bytes = b""
         while self.clipboard_running:
             try:
                 if getattr(self, 'clipboard_paused', False):
@@ -1898,11 +1906,11 @@ class WebRTCInput:
                     curr_data_bytes = None
                 else:
                     curr_data_bytes = curr_data.encode('utf-8') if isinstance(curr_data, str) else curr_data
-                if curr_data_bytes is not None and curr_data_bytes != last_data_bytes:
+                if curr_data_bytes is not None and curr_data_bytes != self.clipboard_last_data_bytes:
                     log_data = curr_data if isinstance(curr_data, str) else f"<{len(curr_data)} bytes>"
                     logger_webrtc_input.info(f"Clipboard changed. Sending content ({curr_mime})")
                     await self.on_clipboard_read(curr_data, curr_mime)
-                    last_data_bytes = curr_data_bytes
+                    self.clipboard_last_data_bytes = curr_data_bytes
                 await asyncio.sleep(0.5)
             except asyncio.CancelledError:
                 logger_webrtc_input.info("Clipboard monitor task cancelled.")
@@ -1915,6 +1923,21 @@ class WebRTCInput:
         logger_webrtc_input.info("Clipboard monitor stopped")
 
     def stop_clipboard(self): self.clipboard_running = False; logger_webrtc_input.info("Stopping clipboard monitor")
+
+    def reset_clipboard_baseline(self):
+        """Setzt die Sende-Baseline zurück, sodass der Monitor-Loop beim
+        nächsten Tick (<=0.5s) den aktuellen Clipboard-Inhalt erneut an ALLE
+        Clients broadcastet. Aufgerufen, wenn ein neuer Client verbindet
+        (z.B. Re-Connect nach managedsave-restore eines geparkten Desk-VMs):
+        ein frisch verbundener Client erhält sonst nur künftige Änderungen,
+        nie den bestehenden Inner-Clipboard-Stand. Idempotent für bereits
+        verbundene Clients (Clipboard-Set ist wiederholbar)."""
+        if self.enable_clipboard not in ["true", "out"]:
+            return
+        # Sentinel der mit keinem realen Clipboard-Inhalt kollidiert -> der
+        # nächste read_clipboard()-Vergleich schlägt garantiert an.
+        self.clipboard_last_data_bytes = b"\x00__dernium_force_clipboard_resend__"
+        logger_webrtc_input.info("Clipboard baseline reset (new client) -> re-push beim nächsten Tick")
     
     async def start_cursor_monitor(self):
         if self.is_wayland:
