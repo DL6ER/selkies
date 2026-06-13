@@ -174,7 +174,34 @@ class SelkiesStreamingApp:
                     message = f"clipboard_binary,{mime_type},{encoded_data}"
                 else:
                     message = f"clipboard,{encoded_data}"
-                websockets.broadcast(self.data_streaming_server.clients, message)
+                # 2026-06-13: NICHT websockets.broadcast() im Klein-Frame-Pfad.
+                # broadcast() ist fire-and-forget und überspringt einen Client
+                # STILL, dessen Write-Buffer über dem High-Water-Mark liegt.
+                # Genau das trifft den frisch reconnecteten Client nach
+                # managedsave-restore: der tote Pre-Park-Client hängt noch im
+                # clients-Set, Frames stauen in dessen Buffer, und der neue
+                # Clipboard-Frame erreicht den lebenden Client nie (e2e: post-
+                # wake/switch 5x sentinel-nopush, KEIN [ws-in]). Stattdessen pro
+                # Client ein await send() mit kurzem Timeout: der lebende Client
+                # bekommt den Frame garantiert (await respektiert Backpressure),
+                # der tote wird nach Timeout/Fehler aus dem Set entfernt.
+                targets = list(self.data_streaming_server.clients)
+                stale = []
+                for ws in targets:
+                    try:
+                        await asyncio.wait_for(ws.send(message), timeout=2.0)
+                    except Exception as e:
+                        data_logger.warning(
+                            f"clipboard send to {getattr(ws, 'remote_address', '?')} failed ({e!r}) -> prune stale client"
+                        )
+                        stale.append(ws)
+                for ws in stale:
+                    self.data_streaming_server.clients.discard(ws)
+                    if getattr(self.data_streaming_server, "data_ws", None) is ws:
+                        self.data_streaming_server.data_ws = None
+                data_logger.info(
+                    f"clipboard pushed to {len(targets) - len(stale)}/{len(targets)} client(s)"
+                )
             else:
                 data_logger.info(f"Sending large clipboard data ({mime_type}, {total_size} bytes) via multipart.")
                 start_message = f"clipboard_start,{mime_type},{total_size}"
