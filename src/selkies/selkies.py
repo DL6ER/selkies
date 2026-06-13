@@ -1656,6 +1656,35 @@ class DataStreamingServer:
             except Exception as e:
                 data_logger.warning(f"Failed to reset clipboard baseline for new client {raddr}: {e}")
 
+        # 2026-06-13: Der reset_clipboard_baseline-Re-Push allein reicht NICHT
+        # (e2e Park+Wake blieb flaky rot). Ursache: der Re-Push hängt am
+        # nächsten Monitor-Tick und geht via websockets.broadcast(self.clients)
+        # raus - während des Connect-Bursts (MODE + cursor + großes
+        # server_settings) kann der Write-Buffer des frischen Clients über dem
+        # High-Water-Mark liegen, dann überspringt broadcast() ihn STILL; und
+        # der tote Pre-Park-Client hängt noch im clients-Set. Deterministischer
+        # ist ein DIREKTER Per-Socket-Re-Send genau an diesen neuen Client (wie
+        # beim Cursor oben): await respektiert Backpressure und ist unabhängig
+        # von Tick-Timing, Broadcast-Skip und Altlast-Clients. Nur Outbound
+        # (inner->outer); Binär/große Inhalte deckt weiterhin der Monitor ab.
+        if (
+            self.input_handler
+            and getattr(self.input_handler, "enable_clipboard", "") in ("true", "out")
+        ):
+            try:
+                clip_data, clip_mime = await self.input_handler.read_clipboard(use_binary=False)
+                if clip_data and clip_mime == "text/plain":
+                    clip_bytes = clip_data.encode("utf-8") if isinstance(clip_data, str) else clip_data
+                    from .input_handler import CLIPBOARD_CHUNK_SIZE
+                    if 0 < len(clip_bytes) < CLIPBOARD_CHUNK_SIZE:
+                        encoded = base64.b64encode(clip_bytes).decode("ascii")
+                        await websocket.send(f"clipboard,{encoded}")
+                        data_logger.info(
+                            f"Sent current clipboard ({len(clip_bytes)} bytes) directly to new client {raddr}"
+                        )
+            except Exception as e:
+                data_logger.warning(f"Failed direct clipboard re-send to new client {raddr}: {e}")
+
         server_settings_payload = {"type": "server_settings", "settings": {}}
         for setting_def in SETTING_DEFINITIONS:
             name = setting_def['name']
