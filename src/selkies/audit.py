@@ -59,10 +59,21 @@ class AuditClient:
     ):
         self.url = url.strip()
         self.token = token.strip()
+        # HTTPS only: the optional Bearer token and the event metadata must
+        # never traverse cleartext. A non-HTTPS URL disables the channel.
+        if self.url and not self.url.lower().startswith("https://"):
+            logger.warning(
+                "audit_webhook_url is not https:// (%s) - audit channel disabled", self.url
+            )
+            self.url = ""
         # Lower bound 100 ms: avoids accidental zero-timeout misconfiguration
         # which aiohttp would interpret as "never time out".
         self.timeout = aiohttp.ClientTimeout(total=max(0.1, float(timeout_seconds)))
         self._session: Optional[aiohttp.ClientSession] = None
+        # Strong refs to in-flight POST tasks. loop.create_task keeps no
+        # reference of its own, so without this the GC can cancel a task
+        # mid-flight and silently drop the event.
+        self._background_tasks: "set[asyncio.Task]" = set()
 
     @property
     def enabled(self) -> bool:
@@ -85,7 +96,9 @@ class AuditClient:
             session = await self._ensure_session()
             async with session.post(self.url, json=payload) as resp:
                 if resp.status >= 400:
-                    body = (await resp.text())[:200]
+                    # Bounded read: a misbehaving collector must not be able to
+                    # make us buffer a huge error body into memory.
+                    body = (await resp.content.read(2048)).decode("utf-8", "replace")
                     logger.warning(
                         "audit webhook returned %s for event=%s: %s",
                         resp.status,
@@ -135,10 +148,14 @@ class AuditClient:
             # synchronous import-time code. Drop the event quietly.
             logger.debug("no running event loop, dropping audit event %s", event)
             return
-        loop.create_task(self._post(payload))
+        task = loop.create_task(self._post(payload))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def close(self) -> None:
-        """Close the underlying HTTP session if one was opened."""
+        """Drain in-flight POSTs and close the underlying HTTP session."""
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
         if self._session is not None and not self._session.closed:
             await self._session.close()
         self._session = None
@@ -156,14 +173,23 @@ def configure(
 ) -> None:
     """(Re)initialize the module-level :class:`AuditClient`.
 
-    Safe to call multiple times: previous instance is dropped without
-    explicit close. Call sites that hold a reference must use
-    :func:`emit` instead of caching the client.
+    Safe to call multiple times. If a previous instance had an open
+    session, its teardown is scheduled on the running loop so reconfiguring
+    does not leak the connector. Call sites must use :func:`emit` rather
+    than caching the client.
     """
     global _default
+    old = _default
     _default = AuditClient(
         url=url, token=token, timeout_seconds=timeout_seconds
     )
+    if old is not None and old._session is not None:
+        try:
+            asyncio.get_running_loop().create_task(old.close())
+        except RuntimeError:
+            # No running loop (e.g. configured before startup); the old
+            # session was never opened, so there is nothing to close.
+            pass
 
 
 def emit(event: str, **fields: Any) -> None:

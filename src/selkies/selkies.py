@@ -1625,89 +1625,10 @@ class DataStreamingServer:
             except Exception as e:
                 data_logger.warning(f"Failed to send initial cursor to new client {raddr}: {e}")
 
-        # Wie beim Cursor: ein frisch verbundener Client (typisch Re-Connect
-        # nach managedsave-restore eines geparkten Desk-VMs) muss auch den
-        # aktuellen Clipboard-Stand bekommen. Der Monitor-Loop sendet sonst nur
-        # bei Änderungen; gleicht der später kopierte Inhalt dem alten Stand,
-        # feuert nie ein "changed" und die Inner->Outer-Bridge erscheint tot.
-        # reset_clipboard_baseline() erzwingt einen Re-Push beim nächsten Tick.
-        if self.input_handler and hasattr(self.input_handler, "reset_clipboard_baseline"):
-            try:
-                self.input_handler.reset_clipboard_baseline()
-            except Exception as e:
-                data_logger.warning(f"Failed to reset clipboard baseline for new client {raddr}: {e}")
-
-        # 2026-06-13: Der reset_clipboard_baseline-Re-Push allein reicht NICHT
-        # (e2e Park+Wake blieb flaky rot). Ursache: der Re-Push hängt am
-        # nächsten Monitor-Tick und geht via websockets.broadcast(self.clients)
-        # raus - während des Connect-Bursts (MODE + cursor + großes
-        # server_settings) kann der Write-Buffer des frischen Clients über dem
-        # High-Water-Mark liegen, dann überspringt broadcast() ihn STILL; und
-        # der tote Pre-Park-Client hängt noch im clients-Set. Deterministischer
-        # ist ein DIREKTER Per-Socket-Re-Send genau an diesen neuen Client (wie
-        # beim Cursor oben): await respektiert Backpressure und ist unabhängig
-        # von Tick-Timing, Broadcast-Skip und Altlast-Clients. Nur Outbound
-        # (inner->outer); Binär/große Inhalte deckt weiterhin der Monitor ab.
-        if (
-            self.input_handler
-            and getattr(self.input_handler, "enable_clipboard", "") in ("true", "out")
-        ):
-            # 2026-06-14: A single connect-time re-send is not enough on the
-            # el-xfce/py3.9 webtop. Post-wake (managedsave-restore + page
-            # reload) the inner clipboard is unchanged from before the park
-            # (same egress IP), so the monitor loop never sees a "change" and
-            # never re-broadcasts; the connect-time direct send DOES deliver
-            # the frame, but a client that keeps re-asserting its own outer-
-            # clipboard locally (e.g. a test sentinel, or a paste-manager)
-            # overwrites it again and again before reading it back, leaving the
-            # inner->outer bridge looking dead. A one-shot burst tied to connect
-            # time also misses the window because the client only starts
-            # reading seconds later. So re-assert the current inner clipboard
-            # to this specific socket periodically for a bounded window after
-            # connect: whatever the client wrote locally in the meantime, the
-            # current inner clipboard is re-applied within ~2s and wins the
-            # next read. Outbound only (inner->outer), small text frames;
-            # binary/large content stays on the monitor path. Stops as soon as
-            # the socket closes or leaves the client set.
-            async def _resend_clipboard_to_client(ws, who):
-                from .input_handler import CLIPBOARD_CHUNK_SIZE
-                # ~60s window, every 2s -> overlaps a slow client's read loop.
-                deadline = time.monotonic() + 60.0
-                first = True
-                while time.monotonic() < deadline:
-                    if not first:
-                        await asyncio.sleep(2.0)
-                    first = False
-                    if ws not in self.clients:
-                        return
-                    try:
-                        clip_data, clip_mime = await self.input_handler.read_clipboard(use_binary=False)
-                        if not clip_data or clip_mime != "text/plain":
-                            continue
-                        clip_bytes = clip_data.encode("utf-8") if isinstance(clip_data, str) else clip_data
-                        if not (0 < len(clip_bytes) < CLIPBOARD_CHUNK_SIZE):
-                            continue
-                        encoded = base64.b64encode(clip_bytes).decode("ascii")
-                        await ws.send(f"clipboard,{encoded}")
-                        data_logger.debug(
-                            f"Re-sent current clipboard ({len(clip_bytes)} bytes) directly to client {who}"
-                        )
-                    except websockets.exceptions.ConnectionClosed:
-                        return
-                    except Exception as e:
-                        # Transient read/send hiccup (e.g. xclip timeout during
-                        # a navigation burst): skip this tick, keep the window
-                        # open. Only a closed socket ends the loop - otherwise a
-                        # single xclip timeout would silently kill the re-send.
-                        data_logger.debug(f"Transient clipboard re-send skip for client {who}: {e}")
-                        continue
-
-            asyncio.create_task(_resend_clipboard_to_client(websocket, raddr))
-
         server_settings_payload = {"type": "server_settings", "settings": {}}
         for setting_def in SETTING_DEFINITIONS:
             name = setting_def['name']
-            if name in ['port', 'dri_node', 'debug', 'audio_device_name', 'watermark_path']:
+            if name in ['port', 'dri_node', 'debug', 'audio_device_name', 'watermark_path', 'audit_webhook_token']:
                 continue
             value = getattr(settings, name)
             if setting_def['type'] == 'bool':
