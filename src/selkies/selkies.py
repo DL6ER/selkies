@@ -2026,6 +2026,11 @@ class DataStreamingServer:
                             data_logger.info(
                                 f"Upload started: {final_server_path} (client rel_path: '{rel_path_from_client}', size: {file_size})"
                             )
+                            _audit.emit(
+                                "file.upload.start",
+                                filename=os.path.basename(final_server_path),
+                                size_bytes=file_size,
+                            )
                         except ValueError:
                             data_logger.error(
                                 f"Invalid FILE_UPLOAD_START format: {message}"
@@ -2046,6 +2051,19 @@ class DataStreamingServer:
                             ].close()
                             data_logger.info(
                                 f"Upload finished: {active_upload_target_path_conn}"
+                            )
+                            # Audit-Emit auf dem LIVE-Upload-Pfad (Daten-WS). Der
+                            # frueher hier fehlende Emit (er lag nur im toten
+                            # FILE_UPLOAD_END-Zweig der Frame-Ack/Video-WS) hat
+                            # file.upload.end auf el-xfce nie feuern lassen.
+                            try:
+                                _au_end_size = os.path.getsize(active_upload_target_path_conn)
+                            except OSError:
+                                _au_end_size = -1
+                            _audit.emit(
+                                "file.upload.end",
+                                filename=os.path.basename(active_upload_target_path_conn),
+                                size_bytes=_au_end_size,
                             )
                             del active_uploads_by_path_conn[
                                 active_upload_target_path_conn
@@ -2069,6 +2087,13 @@ class DataStreamingServer:
                             del active_uploads_by_path_conn[
                                 active_upload_target_path_conn
                             ]
+                        _audit.emit(
+                            "file.upload.error",
+                            filename=os.path.basename(active_upload_target_path_conn)
+                            if active_upload_target_path_conn
+                            else "",
+                            error=message.split(":", 1)[1] if ":" in message else "",
+                        )
                         active_upload_target_path_conn = None
 
                     elif message.startswith("SETTINGS,"):
@@ -2240,46 +2265,6 @@ class DataStreamingServer:
                                                 display_state['smoothed_rtt'] = sum(rtt_samples) / len(rtt_samples)
                         except (IndexError, ValueError):
                             data_logger.warning(f"Malformed CLIENT_FRAME_ACK from {raddr}: {message}")
-
-                    elif message.startswith("FILE_UPLOAD_END:"):
-                        _au_target = active_upload_target_path_conn
-                        if (
-                            _au_target
-                            and _au_target in active_uploads_by_path_conn
-                        ):
-                            active_uploads_by_path_conn[_au_target].close()
-                            data_logger.info(f"Upload finished: {_au_target}")
-                            try:
-                                _au_size = os.path.getsize(_au_target)
-                            except OSError:
-                                _au_size = -1
-                            _audit.emit(
-                                "file.upload.end",
-                                filename=os.path.basename(_au_target),
-                                size_bytes=_au_size,
-                            )
-                            del active_uploads_by_path_conn[_au_target]
-                        active_upload_target_path_conn = None
-
-                    elif message.startswith("FILE_UPLOAD_ERROR:"):
-                        data_logger.error(f"Client reported upload error: {message}")
-                        _au_target = active_upload_target_path_conn
-                        if (
-                            _au_target
-                            and _au_target in active_uploads_by_path_conn
-                        ):
-                            active_uploads_by_path_conn[_au_target].close()
-                            try:
-                                os.remove(_au_target)
-                            except OSError:
-                                pass
-                            del active_uploads_by_path_conn[_au_target]
-                        _audit.emit(
-                            "file.upload.error",
-                            filename=os.path.basename(_au_target) if _au_target else "",
-                            error=message.split(":", 2)[1] if ":" in message else "",
-                        )
-                        active_upload_target_path_conn = None
 
                     elif message == "START_VIDEO":
                         perms = client_permissions.get(websocket)
