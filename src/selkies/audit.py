@@ -33,13 +33,40 @@ short-circuits the module-level :func:`emit` to a no-op.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import aiohttp
 
 logger = logging.getLogger("audit")
+
+
+def _transport_ok(url: str) -> bool:
+    """True if the audit URL may carry the Bearer token in the clear.
+
+    https:// is always fine. http:// is allowed ONLY when the host is a
+    private/loopback address (RFC 1918, 127/8, ::1, link-local) -- the
+    internal vm-host-audit-proxy case (e.g. http://192.168.122.1:9001 on the
+    libvirt bridge), where the request never leaves the host. Public http://
+    is rejected, so token + metadata never traverse cleartext to an external
+    collector.
+    """
+    low = url.lower()
+    if low.startswith("https://"):
+        return True
+    if not low.startswith("http://"):
+        return False
+    host = urlparse(url).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
 
 
 class AuditClient:
@@ -59,11 +86,16 @@ class AuditClient:
     ):
         self.url = url.strip()
         self.token = token.strip()
-        # HTTPS only: the optional Bearer token and the event metadata must
-        # never traverse cleartext. A non-HTTPS URL disables the channel.
-        if self.url and not self.url.lower().startswith("https://"):
+        # Transport policy: the Bearer token + metadata must never traverse
+        # cleartext to an EXTERNAL collector, so public URLs must be https://.
+        # http:// is accepted only for a private/loopback sink (the Dernium
+        # vm-host-audit-proxy on 192.168.122.1) -- that hop never leaves the
+        # host. See _transport_ok().
+        if self.url and not _transport_ok(self.url):
             logger.warning(
-                "audit_webhook_url is not https:// (%s) - audit channel disabled", self.url
+                "audit_webhook_url is neither https:// nor a private http:// sink "
+                "(%s) - audit channel disabled",
+                self.url,
             )
             self.url = ""
         # Lower bound 100 ms: avoids accidental zero-timeout misconfiguration
