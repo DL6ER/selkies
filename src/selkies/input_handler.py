@@ -1645,6 +1645,20 @@ class WebRTCInput:
 
     def stop_clipboard(self): self.clipboard_running = False; logger_webrtc_input.info("Stopping clipboard monitor")
 
+    def reset_clipboard_baseline(self):
+        """Setzt die Sende-Baseline zurück, sodass der Monitor-Loop beim
+        nächsten Tick (<=0.5s) den aktuellen Clipboard-Inhalt erneut an ALLE
+        Clients broadcastet. Aufgerufen, wenn ein neuer Client verbindet
+        (z.B. Re-Connect nach managedsave-restore eines geparkten Desk-VMs):
+        ein frisch verbundener Client erhält sonst nur künftige Änderungen,
+        nie den bestehenden Inner-Clipboard-Stand. Idempotent für bereits
+        verbundene Clients (Clipboard-Set ist wiederholbar)."""
+        if self.enable_clipboard not in ["true", "out"]:
+            return
+        # Sentinel der mit keinem realen Clipboard-Inhalt kollidiert -> der
+        # nächste read_clipboard()-Vergleich schlägt garantiert an.
+        self.clipboard_last_data_bytes = b"\x00__dernium_force_clipboard_resend__"
+        logger_webrtc_input.info("Clipboard baseline reset (new client) -> re-push beim nächsten Tick")
     
     async def start_cursor_monitor(self):
         if self.is_wayland:
